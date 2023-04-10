@@ -46,7 +46,7 @@ void main() {
     float rimDot = 1.0 - dot(V, N);
     float rimPower = rimDot * pow(nDotL, kRimThresh);
     rimPower = smoothstep(kRim-0.01, kRim+0.01, rimPower);
-    out_color += vec3(0.2) * rimPower;
+    out_color += vec3(0.2) * rimPower * diffuse;
 
     f_color = vec4(out_color, 1.0);
 }

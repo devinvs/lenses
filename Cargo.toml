@@ -12,3 +12,6 @@ winit = { version="0.26"}
 vulkano-win = {version="0.30"}
 bytemuck = { version = "1.12"}
 cgmath = { version = "0.18"}
+rand = "*"
+serde = { version="1", features=["derive"] }
+serde_yaml = "0.9"

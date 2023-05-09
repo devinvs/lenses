@@ -1,14 +1,15 @@
 use std::sync::Arc;
-use std::time::Instant;
 
+use vulkano::pipeline::graphics::rasterization::RasterizationState;
+use vulkano::pipeline::graphics::rasterization::CullMode;
 use vulkano::pipeline::graphics::input_assembly::InputAssemblyState;
 use vulkano::format::Format;
 
+use vulkano::pipeline::graphics::depth_stencil::DepthStencilState;
 use vulkano::pipeline::graphics::color_blend::ColorBlendState;
 use vulkano::pipeline::PipelineBindPoint;
 use vulkano::buffer::BufferUsage;
 use vulkano::command_buffer::RenderPassBeginInfo;
-use vulkano::buffer::TypedBufferAccess;
 use vulkano::descriptor_set::WriteDescriptorSet;
 use vulkano::device::physical::PhysicalDeviceType;
 use vulkano::pipeline::Pipeline;
@@ -17,7 +18,6 @@ use vulkano::swapchain::SwapchainCreateInfo;
 use vulkano::shader::ShaderModule;
 use vulkano::pipeline::graphics::vertex_input::BuffersDefinition;
 use vulkano::pipeline::graphics::viewport::ViewportState;
-use vulkano::pipeline::graphics::depth_stencil::DepthStencilState;
 use vulkano::descriptor_set::PersistentDescriptorSet;
 use vulkano::render_pass::FramebufferCreateInfo;
 use vulkano::buffer::CpuBufferPool;
@@ -46,7 +46,6 @@ use vulkano::instance::Instance;
 use vulkano::memory::pool::StdMemoryPool;
 use vulkano::pipeline::GraphicsPipeline;
 use vulkano::pipeline::graphics::viewport::Viewport;
-use vulkano::pipeline::graphics::viewport::Scissor;
 use vulkano::render_pass::{
     Framebuffer,
     RenderPass,
@@ -69,9 +68,19 @@ use winit::event_loop::EventLoop;
 use winit::window::Window;
 use winit::window::WindowBuilder;
 
-use cgmath::{Point3, Vector3, Matrix4, Matrix3, Rad};
-
 use crate::{Vertex, Normal};
+
+pub type VertexBuffer = Arc<CpuBufferPoolChunk<Vertex, Arc<StdMemoryPool>>>;
+pub type IndexBuffer = Arc<CpuBufferPoolChunk<u32, Arc<StdMemoryPool>>>;
+pub type NormalBuffer = Arc<CpuBufferPoolChunk<Normal, Arc<StdMemoryPool>>>;
+pub type Uniform = vs::ty::Data;
+
+#[derive(Debug, Clone)]
+pub struct Model {
+    pub index: u32,
+    pub count: u32
+}
+
 
 pub struct VulkanState {
     _instance: Arc<Instance>,
@@ -89,19 +98,14 @@ pub struct VulkanState {
     fs: Arc<ShaderModule>,
 
     vertex_buffer_pool: CpuBufferPool<Vertex>,
-    index_buffer_pool: CpuBufferPool<u16>,
+    index_buffer_pool: CpuBufferPool<u32>,
     normal_buffer_pool: CpuBufferPool<Normal>,
     uniform_buffer_pool: CpuBufferPool<vs::ty::Data>,
-
-    vertex_buffer: Arc<CpuBufferPoolChunk<Vertex, Arc<StdMemoryPool>>>,
-    index_buffer: Arc<CpuBufferPoolChunk<u16, Arc<StdMemoryPool>>>,
-    normal_buffer: Arc<CpuBufferPoolChunk<Normal, Arc<StdMemoryPool>>>,
 
     pub recreate_swapchain: bool,
     pub previous_frame_end: Option<Box<dyn GpuFuture>>,
 
     clear_color: [f32; 4],
-    rotation_start: Instant
 }
 
 impl VulkanState {
@@ -204,10 +208,6 @@ impl VulkanState {
         let normal_buffer_pool = CpuBufferPool::vertex_buffer(device.clone());
         let uniform_buffer_pool = CpuBufferPool::uniform_buffer(device.clone());
 
-        let vertex_buffer = vertex_buffer_pool.chunk([]).unwrap();
-        let index_buffer = index_buffer_pool.chunk([]).unwrap();
-        let normal_buffer = normal_buffer_pool.chunk([]).unwrap();
-
         let render_pass = vulkano::single_pass_renderpass!(
             device.clone(),
             attachments: {
@@ -246,70 +246,34 @@ impl VulkanState {
             framebuffers,
             render_pass,
             pipeline,
-            vs: vs,
-            fs: fs,
+            vs,
+            fs,
             vertex_buffer_pool,
             index_buffer_pool,
             normal_buffer_pool,
             uniform_buffer_pool,
-            vertex_buffer,
-            normal_buffer,
-            index_buffer,
             recreate_swapchain: false,
             previous_frame_end,
             clear_color: [0.605, 0.607, 0.795, 1.0],
-            rotation_start: Instant::now(),
         }
     }
 
-    pub fn draw(&mut self) {
+    pub fn draw<'a>(
+        &mut self,
+        vertex_buffer: VertexBuffer,
+        index_buffer: IndexBuffer,
+        normal_buffer: NormalBuffer,
+        mut models: impl Iterator<Item=&'a Model>,
+        uniforms: &Vec<vs::ty::Data>
+    ) {
         self.previous_frame_end.as_mut().unwrap().cleanup_finished();
 
         if self.recreate_swapchain {
             self.recreate_swapchain();
         }
 
-        let uniform_buffer_subbuffer = {
-            let elapsed = self.rotation_start.elapsed();
-            let rotation = elapsed.as_secs_f32() / 4.0;
-            let rotation = Matrix3::from_angle_y(Rad(rotation as f32));
-
-            let ext = self.swapchain.image_extent();
-            let aspect_ratio = ext[0] as f32 / ext[1] as f32;
-
-            let proj = cgmath::perspective(
-                Rad(std::f32::consts::FRAC_PI_2),
-                aspect_ratio,
-                0.01,
-                100.0
-            );
-
-            let view = Matrix4::look_at_rh(
-                Point3::new(0.3, 0.3, 2.0),
-                Point3::new(0.0, 0.0, 0.0),
-                Vector3::new(0.0, -1.0, 0.0),
-            );
-
-            let scale = Matrix4::from_scale(0.01);
-
-            let uniform_data = vs::ty::Data {
-                world: Matrix4::from(rotation).into(),
-                view: (view * scale).into(),
-                proj: proj.into(),
-                o_color: Vector3::new(0.509, 0.282, 0.686).into()
-            };
-            self.uniform_buffer_pool.next(uniform_data).unwrap()
-        };
-
         // Descriptor set
         let layout = self.pipeline.layout().set_layouts().get(0).unwrap();
-        let set = PersistentDescriptorSet::new(
-            layout.clone(),
-            [
-                WriteDescriptorSet::buffer(0, uniform_buffer_subbuffer),
-            ]
-        ).unwrap();
-
         // Acquire image from swapchain
         let (image_num, suboptimal, acquire_future) =
             match swapchain::acquire_next_image(self.swapchain.clone(), None) {
@@ -341,16 +305,36 @@ impl VulkanState {
                 SubpassContents::Inline,
             ).unwrap()
             .bind_pipeline_graphics(self.pipeline.clone())
+            .bind_vertex_buffers(0, (vertex_buffer.clone(), normal_buffer.clone()))
+            .bind_index_buffer(index_buffer.clone());
+
+        for i in 0..uniforms.len() {
+            let uniform_buffer_subbuffer = {
+                self.uniform_buffer_pool.next(uniforms[i]).unwrap()
+            };
+
+            let set = PersistentDescriptorSet::new(
+                layout.clone(),
+                [
+                    WriteDescriptorSet::buffer(0, uniform_buffer_subbuffer),
+                ]
+            ).unwrap();
+
+            let model = models.next().unwrap();
+
+            builder
             .bind_descriptor_sets(
                 PipelineBindPoint::Graphics,
                 self.pipeline.layout().clone(),
                 0,
                 set.clone()
             )
-            .bind_vertex_buffers(0, (self.vertex_buffer.clone(), self.normal_buffer.clone()))
-            .bind_index_buffer(self.index_buffer.clone())
-            .draw_indexed(self.index_buffer.len() as u32, 1, 0, 0, 0)
-            .unwrap()
+            .draw_indexed(model.count * 3, 1, model.index * 3, 0, 0)
+            .unwrap();
+
+        }
+
+        builder
             .end_render_pass()
             .unwrap();
         let command_buffer = builder.build().unwrap();
@@ -379,18 +363,24 @@ impl VulkanState {
         }
     }
 
-    pub fn transfer_object_data<I, J, K>(&mut self, vertices: I, indices: J, normals: K)
+    pub fn transfer_object_data<I, J, K>(&mut self, vertices: I, indices: J, normals: K) -> (
+        VertexBuffer,
+        IndexBuffer,
+        NormalBuffer
+    )
     where
         I: IntoIterator<Item = Vertex>,
         I::IntoIter: ExactSizeIterator,
-        J: IntoIterator<Item = u16>,
+        J: IntoIterator<Item = u32>,
         J::IntoIter: ExactSizeIterator,
         K: IntoIterator<Item = Normal>,
         K::IntoIter: ExactSizeIterator,
     {
-        self.vertex_buffer = self.vertex_buffer_pool.chunk(vertices).unwrap();
-        self.index_buffer = self.index_buffer_pool.chunk(indices).unwrap();
-        self.normal_buffer = self.normal_buffer_pool.chunk(normals).unwrap();
+        let vertex_buffer = self.vertex_buffer_pool.chunk(vertices).unwrap();
+        let index_buffer = self.index_buffer_pool.chunk(indices).unwrap();
+        let normal_buffer = self.normal_buffer_pool.chunk(normals).unwrap();
+
+        (vertex_buffer, index_buffer, normal_buffer)
     }
 
     pub fn recreate_swapchain(&mut self) {
@@ -457,6 +447,8 @@ impl VulkanState {
         ]))
         .fragment_shader(fs.entry_point("main").unwrap(), ())
         .depth_stencil_state(DepthStencilState::simple_depth_test())
+        .color_blend_state(ColorBlendState::default().blend_alpha())
+        .rasterization_state(RasterizationState::new().cull_mode(CullMode::Back))
         .render_pass(Subpass::from(render_pass.clone(), 0).unwrap())
         .build(device.clone())
         .unwrap();
@@ -488,7 +480,7 @@ mod vs {
     vulkano_shaders::shader! {
         ty: "vertex",
         path: "src/vert.glsl",
-        types_meta: { use bytemuck::{Pod, Zeroable}; #[derive(Copy, Clone, Pod, Zeroable)] },
+        types_meta: { use bytemuck::{Pod, Zeroable}; #[derive(Copy, Clone, Pod, Zeroable, Default)] },
     }
 }
 
